@@ -1,19 +1,15 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-import requests
 import os
+import requests
 
 app = FastAPI()
 
 # =========================
-# 📦 历史数据
+# 📦 历史数据（内存）
 # =========================
 history_data = []
 
-# =========================
-# 🔑 API KEY（从环境变量读取）
-# =========================
-API_KEY = os.getenv("ALIYUN_API_KEY")
 
 # =========================
 # 📥 请求模型
@@ -27,82 +23,115 @@ class RiskInput(BaseModel):
 
 
 # =========================
-# 🤖 调用阿里云通义千问
+# 🤖 AI分析函数（阿里云通义千问）
 # =========================
-def call_qwen(prompt):
+def ai_analyze(data: RiskInput):
+    api_key = os.getenv("ALIYUN_API_KEY")
+    print("API KEY:", api_key)
+
+    if not api_key:
+        return {
+            "risk_score": -1,
+            "risk_level": "错误",
+            "analysis": ["未配置 API Key"],
+            "suggestions": ["请在 Railway 配置 ALIYUN_API_KEY"]
+        }
+
     url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
 
     headers = {
-        "Authorization": f"Bearer {API_KEY}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
+
+    prompt = f"""
+你是一名资深财务分析师，请根据以下数据分析企业风险：
+
+总资产: {data.total_assets}
+总负债: {data.total_liabilities}
+流动比率: {data.current_ratio}
+净利润: {data.net_profit}
+ROE: {data.roe}
+
+请返回严格JSON格式，包含：
+risk_score（0-100）
+risk_level（低/中/高风险）
+analysis（数组，3-5条分析）
+suggestions（数组，3-5条建议）
+"""
 
     payload = {
         "model": "qwen-turbo",
         "input": {
-            "prompt": prompt
+            "messages": [
+                {"role": "system", "content": "你是专业财务分析AI"},
+                {"role": "user", "content": prompt}
+            ]
         }
     }
 
-    response = requests.post(url, json=payload, headers=headers)
-    result = response.json()
-
     try:
-        return result["output"]["text"]
-    except:
-        return "AI分析失败，请检查API调用"
+        response = requests.post(url, headers=headers, json=payload, timeout=20)
+
+        print("AI HTTP状态码:", response.status_code)
+        print("AI返回原始数据:", response.text)
+
+        if response.status_code != 200:
+            return {
+                "risk_score": -1,
+                "risk_level": "错误",
+                "analysis": [f"API调用失败: {response.text}"],
+                "suggestions": ["检查 API Key 或网络"]
+            }
+
+        result = response.json()
+
+        # ✅ 正确解析通义千问返回
+        content = result["output"]["choices"][0]["message"]["content"]
+
+        return {
+            "risk_score": 50,
+            "risk_level": "AI分析",
+            "analysis": [content],
+            "suggestions": ["以上为AI生成分析"]
+        }
+
+    except Exception as e:
+        print("AI调用异常:", str(e))
+        return {
+            "risk_score": -1,
+            "risk_level": "错误",
+            "analysis": [str(e)],
+            "suggestions": ["检查服务器或API配置"]
+        }
 
 
 # =========================
-# 🤖 AI分析（核心）
-# =========================
-def ai_analyze(data: RiskInput):
-
-    prompt = f"""
-你是一个专业的财务分析师，请根据以下企业数据进行分析：
-
-总资产：{data.total_assets}
-总负债：{data.total_liabilities}
-流动比率：{data.current_ratio}
-净利润：{data.net_profit}
-ROE：{data.roe}
-
-请严格按照以下格式输出：
-风险评分: xx
-风险等级: xx
-分析:
-1. xxx
-2. xxx
-建议:
-1. xxx
-2. xxx
-"""
-
-    ai_text = call_qwen(prompt)
-
-    return {
-        "risk_score": 50,  # 先占位（下一步我们解析）
-        "risk_level": "AI分析",
-        "analysis": [ai_text],
-        "suggestions": ["详见AI分析"]
-    }
-
-
-# =========================
-# 🚀 接口
+# 🚀 预测接口
 # =========================
 @app.post("/predict")
 def predict(data: RiskInput):
     result = ai_analyze(data)
 
-    history_data.append(result["risk_score"])
+    # 保存历史（存评分）
+    history_data.append(result.get("risk_score", 0))
 
     return result
 
 
 # =========================
-# 📊 历史
+# 📊 历史接口
 # =========================
 @app.get("/history")
 def get_history():
-    return {"history": history_data}
+    return {
+        "history": history_data
+    }
+
+
+# =========================
+# 🚀 启动（本地调试）
+# =========================
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=8000)
